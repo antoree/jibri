@@ -21,6 +21,8 @@ import com.fasterxml.jackson.annotation.JsonAnyGetter
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import org.jitsi.jibri.AwsS3Util
+import org.jitsi.jibri.Mp4Ulti
 import org.jitsi.jibri.capture.ffmpeg.FfmpegCapturer
 import org.jitsi.jibri.config.Config
 import org.jitsi.jibri.config.XmppCredentials
@@ -35,48 +37,55 @@ import org.jitsi.jibri.sink.Sink
 import org.jitsi.jibri.sink.impl.FileSink
 import org.jitsi.jibri.status.ComponentState
 import org.jitsi.jibri.status.ErrorScope
+import org.jitsi.jibri.util.LoggingDoannh
 import org.jitsi.jibri.util.ProcessFactory
 import org.jitsi.jibri.util.createIfDoesNotExist
 import org.jitsi.jibri.util.whenever
 import org.jitsi.metaconfig.config
 import org.jitsi.xmpp.extensions.jibri.JibriIq
+import java.io.File
 import java.nio.file.FileSystem
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.time.LocalDate
 
 /**
  * Parameters needed for starting a [FileRecordingJibriService]
  */
 data class FileRecordingParams(
-    /**
-     * Which call we'll join
-     */
-    val callParams: CallParams,
-    /**
-     * The ID of this session
-     */
-    val sessionId: String,
-    /**
-     * The login information needed to appear invisible in
-     * the call
-     */
-    val callLoginParams: XmppCredentials,
-    /**
-     * A map of arbitrary key, value metadata that will be written
-     * to the metadata file.
-     */
-    val additionalMetadata: Map<Any, Any>? = null
+        /**
+         * Which call we'll join
+         */
+        val callParams: CallParams,
+        /**
+         * The ID of this session
+         */
+        val sessionId: String,
+        /**
+         * The login information needed to appear invisible in
+         * the call
+         */
+        val callLoginParams: XmppCredentials,
+        /**
+         * A map of arbitrary key, value metadata that will be written
+         * to the metadata file.
+         */
+        val additionalMetadata: Map<Any, Any>? = null
 )
 
 /**
  * Set of metadata we'll put alongside the recording file(s)
  */
 data class RecordingMetadata(
-    @JsonProperty("meeting_url")
-    val meetingUrl: String,
-    val participants: List<Map<String, Any>>,
-    @JsonIgnore val additionalMetadata: Map<Any, Any>? = null
+        @JsonProperty("meeting_url")
+        val meetingUrl: String,
+        val localUrl: String,
+        val s3Url: String,
+        val videoDuration: Long,
+        val room: String,
+        val participants: List<Map<String, Any>>,
+        @JsonIgnore val additionalMetadata: Map<Any, Any>? = null
 ) {
     /**
      * We tell the JSON serializer to ignore the additionalMetadata map (above)
@@ -94,12 +103,12 @@ data class RecordingMetadata(
  * to a file to be replayed later.
  */
 class FileRecordingJibriService(
-    private val fileRecordingParams: FileRecordingParams,
-    jibriSelenium: JibriSelenium? = null,
-    capturer: FfmpegCapturer? = null,
-    processFactory: ProcessFactory = ProcessFactory(),
-    fileSystem: FileSystem = FileSystems.getDefault(),
-    private var jibriServiceFinalizer: JibriServiceFinalizer? = null
+        private val fileRecordingParams: FileRecordingParams,
+        jibriSelenium: JibriSelenium? = null,
+        capturer: FfmpegCapturer? = null,
+        private var processFactory: ProcessFactory = ProcessFactory(),
+        fileSystem: FileSystem = FileSystems.getDefault(),
+        private var jibriServiceFinalizer: JibriServiceFinalizer? = null
 ) : StatefulJibriService("File recording") {
     init {
         logger.addContext("session_id", fileRecordingParams.sessionId)
@@ -127,24 +136,34 @@ class FileRecordingJibriService(
      * The directory in which we'll store recordings for this particular session.  This is a directory that will
      * be nested within [recordingsDirectory].
      */
+    //todo doannh set folder by year/month/day
+    var currentDate: LocalDate = LocalDate.now();
+    var year = currentDate.year
+    var month = currentDate.month
+    var day = currentDate.dayOfMonth
+
     private val sessionRecordingDirectory =
-        fileSystem.getPath(recordingsDirectory).resolve(fileRecordingParams.sessionId)
+//        fileSystem.getPath(recordingsDirectory).resolve(fileRecordingParams.sessionId)
+            fileSystem.getPath(recordingsDirectory).resolve("$year/$month/$day/${fileRecordingParams.sessionId}")
 
     init {
         logger.info("Writing recording to $sessionRecordingDirectory, finalize script path $finalizeScriptPath")
         sink = FileSink(
-            sessionRecordingDirectory,
-            fileRecordingParams.callParams.callUrlInfo.callName
+                sessionRecordingDirectory,
+                fileRecordingParams.callParams.callUrlInfo.callName
         )
+        LoggingDoannh.log("the sink is ${sink.path}")
+
+        LoggingDoannh.log("FILE recording params: ${jacksonObjectMapper().writeValueAsString(fileRecordingParams)}")
 
         registerSubComponent(JibriSelenium.COMPONENT_ID, this.jibriSelenium)
         registerSubComponent(FfmpegCapturer.COMPONENT_ID, this.capturer)
 
         jibriServiceFinalizer = JibriServiceFinalizeCommandRunner(
-            processFactory, listOf(
+                processFactory, listOf(
                 finalizeScriptPath,
                 sessionRecordingDirectory.toString()
-            )
+        )
         )
     }
 
@@ -159,8 +178,8 @@ class FileRecordingJibriService(
             return
         }
         jibriSelenium.joinCall(
-            fileRecordingParams.callParams.callUrlInfo.copy(urlParams = RECORDING_URL_OPTIONS),
-            fileRecordingParams.callLoginParams
+                fileRecordingParams.callParams.callUrlInfo.copy(urlParams = RECORDING_URL_OPTIONS),
+                fileRecordingParams.callLoginParams
         )
 
         whenever(jibriSelenium).transitionsTo(ComponentState.Running) {
@@ -201,9 +220,9 @@ class FileRecordingJibriService(
             jibriSelenium.getParticipants()
         } catch (t: Throwable) {
             logger.error(
-                "An error occurred while trying to get the participants list, proceeding with " +
-                        "an empty participants list",
-                t
+                    "An error occurred while trying to get the participants list, proceeding with " +
+                            "an empty participants list",
+                    t
             )
             listOf<Map<String, Any>>()
         }
@@ -211,19 +230,33 @@ class FileRecordingJibriService(
         if (Files.isWritable(sessionRecordingDirectory)) {
             val metadataFile = sessionRecordingDirectory.resolve("metadata.json")
             val metadata = RecordingMetadata(
-                fileRecordingParams.callParams.callUrlInfo.callUrl,
-                participants,
-                fileRecordingParams.additionalMetadata
+                    fileRecordingParams.callParams.callUrlInfo.callUrl,
+                    sink.path,
+                    AwsS3Util.uploadFile(sink.path),
+                    Mp4Ulti.getMp4FileInfo(sink.path),
+                    fileRecordingParams.callParams.callUrlInfo.callName,
+                    participants,
+                    fileRecordingParams.additionalMetadata
             )
             try {
                 Files.newBufferedWriter(metadataFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
-                    .use {
-                        jacksonObjectMapper().writeValue(it, metadata)
-                    }
+                        .use {
+                            jacksonObjectMapper().writeValue(it, metadata)
+                        }
             } catch (t: Throwable) {
                 logger.error("Error writing metadata", t)
                 publishStatus(ComponentState.Error(CouldntWriteMeetingMetadata))
             }
+            //todo doannh remove local file
+            File(sink.path).delete()
+            val metaJson = jacksonObjectMapper().writeValueAsString(metadata);
+            jibriServiceFinalizer = JibriServiceFinalizeCommandRunner(
+                    processFactory, listOf(
+                    finalizeScriptPath,
+                    metaJson
+            )
+            )
+
         } else {
             logger.error("Unable to write metadata file to recording directory $recordingsDirectory")
         }

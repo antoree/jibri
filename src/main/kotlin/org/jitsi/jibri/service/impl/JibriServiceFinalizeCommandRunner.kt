@@ -16,6 +16,7 @@
 
 package org.jitsi.jibri.service.impl
 
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.jitsi.jibri.service.JibriServiceFinalizer
 import org.jitsi.jibri.util.LoggingUtils
 import org.jitsi.jibri.util.ProcessFactory
